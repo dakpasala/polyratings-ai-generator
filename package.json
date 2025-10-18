@@ -1,0 +1,10 @@
+{
+    "name": "polyratings-ai-generator",
+    "version": "1.0.0",
+    "type": "module",
+    "dependencies": {
+      "csv-parse": "^5.5.0",
+      "node-fetch": "^3.3.2"
+    }
+  }
+  
