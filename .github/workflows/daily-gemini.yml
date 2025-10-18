@@ -5,6 +5,9 @@ on:
     - cron: "0 8 * * *"  # runs every day at 8 AM UTC (midnight PST)
   workflow_dispatch:      # allows manual run from GitHub Actions tab
 
+permissions:
+  contents: write  # ✅ allow push access for github-actions[bot]
+
 jobs:
   generate:
     runs-on: ubuntu-latest
