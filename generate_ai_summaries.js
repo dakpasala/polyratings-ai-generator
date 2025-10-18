@@ -2,7 +2,7 @@ import fs from "fs";
 import fetch from "node-fetch";
 import { parse } from "csv-parse/sync";
 
-const GEMINI_API_KEY = "AIzaSyCmwRwQpxuZFifAH9tOTUOGcx7hasCspK8";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;;
 if (!GEMINI_API_KEY) {
   console.error("❌ Missing GEMINI_API_KEY in environment variables");
   process.exit(1);
@@ -12,6 +12,12 @@ const RATINGS_URL =
   "https://raw.githubusercontent.com/sreshtalluri/polyratings-data-collection/refs/heads/main/data/main/professors_data.csv";
 const COMMENTS_URL =
   "https://raw.githubusercontent.com/sreshtalluri/polyratings-data-collection/refs/heads/main/data/main/professor_detailed_reviews.csv";
+
+const OUTPUT_DIR = "summaries";
+const OUTPUT_FILE = `${OUTPUT_DIR}/ai_summaries.json`;
+const STATE_FILE = `${OUTPUT_DIR}/state.json`;
+
+const BATCH_SIZE = 2; // for testing — later set to 400/day
 
 // ---------------------- Helpers ----------------------
 
@@ -99,11 +105,10 @@ Department: ${prof.department}
 Courses: ${prof.courses}
 Student Comments: "${prof.comments.substring(0, 1000)}"
 
-Provide 5 concise sentences describing what this professor is known for and what students can expect. End your response with: "${prof.link}"`;
+Provide 5 descriptive sentences describing what this professor is known for and what students can expect. Also talk about like which years succeed
+and don't succeed. End your response with: "${prof.link}"`;
 
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-  };
+  const body = { contents: [{ parts: [{ text: prompt }] }] };
 
   const resp = await fetch(endpoint, {
     method: "POST",
@@ -121,6 +126,32 @@ Provide 5 concise sentences describing what this professor is known for and what
   return text || "AI summary unavailable.";
 }
 
+// ---------------------- State Handling ----------------------
+
+function loadState() {
+  if (!fs.existsSync(STATE_FILE)) {
+    return { lastIndex: 0 };
+  }
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
+  } catch {
+    return { lastIndex: 0 };
+  }
+}
+
+function saveState(state) {
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+function loadExistingSummaries() {
+  if (!fs.existsSync(OUTPUT_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(OUTPUT_FILE, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
 // ---------------------- Main ----------------------
 
 async function main() {
@@ -130,28 +161,48 @@ async function main() {
     fetchCSV(COMMENTS_URL),
   ]);
 
-  console.log(`✅ Loaded ${ratings.length} ratings & ${comments.length} comments`);
   const professors = convertCSVToProfessorData(ratings, comments);
+  console.log(`✅ Loaded ${professors.length} total professors`);
 
-  // Limit for testing
-  const testBatch = professors.slice(0, 2); // only 2 professors
+  // Load state and existing summaries
+  const state = loadState();
+  const existingSummaries = loadExistingSummaries();
 
-  const results = {};
-  for (const prof of testBatch) {
+  const startIndex = state.lastIndex || 0;
+  const endIndex = Math.min(startIndex + BATCH_SIZE, professors.length);
+
+  console.log(
+    `📦 Processing professors ${startIndex + 1}-${endIndex} of ${professors.length}`
+  );
+
+  const batch = professors.slice(startIndex, endIndex);
+  const results = { ...existingSummaries };
+
+  for (const prof of batch) {
+    if (results[prof.name]) {
+      console.log(`⏩ Skipping ${prof.name} (already processed)`);
+      continue;
+    }
     console.log(`🧠 Generating AI summary for ${prof.name}...`);
     const summary = await callGeminiAnalysis(prof);
     results[prof.name] = summary;
   }
 
-  // Ensure directory exists
-  fs.mkdirSync("summaries", { recursive: true });
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(results, null, 2));
+  console.log(`✅ Saved ${Object.keys(results).length} total summaries`);
 
-  // Save output
-  const outputPath = "summaries/test_batch.json";
-  fs.writeFileSync(outputPath, JSON.stringify(results, null, 2));
-  console.log(`✅ Saved ${Object.keys(results).length} summaries to ${outputPath}`);
-  console.log("\n📜 Output JSON:");
-  console.log(JSON.stringify(results, null, 2));
+  // Update state for next run
+  saveState({ lastIndex: endIndex });
+
+  if (endIndex >= professors.length) {
+    console.log("🎉 All professors processed!");
+  } else {
+    console.log(`📍 Progress saved. Next start index: ${endIndex}`);
+  }
+
+  console.log("\n📜 Latest batch:");
+  console.log(batch.map((p) => `${p.name}: ${results[p.name]}`).join("\n\n"));
 }
 
 main().catch((err) => {

@@ -1,0 +1,35 @@
+name: Daily Gemini Summary Generator
+
+on:
+  schedule:
+    - cron: "0 8 * * *"  # runs every day at 8 AM UTC (midnight PST)
+  workflow_dispatch:      # allows manual run from GitHub Actions tab
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repo
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📦 Install dependencies
+        run: npm install
+
+      - name: 🤖 Run Gemini generator script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: node generate_ai_summaries.js
+
+      - name: 💾 Commit and push results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add summaries/
+          git commit -m "🔁 Auto-update AI summaries (daily batch)" || echo "No new summaries to commit"
+          git push
