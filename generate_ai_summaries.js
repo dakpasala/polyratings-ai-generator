@@ -17,7 +17,7 @@ const OUTPUT_DIR = "summaries";
 const OUTPUT_FILE = `${OUTPUT_DIR}/ai_summaries.json`;
 const STATE_FILE = `${OUTPUT_DIR}/state.json`;
 
-const BATCH_SIZE = 2; // for testing — later set to 400/day
+const BATCH_SIZE = 400; // for testing — later set to 400/day
 
 // ---------------------- Helpers ----------------------
 
