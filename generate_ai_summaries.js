@@ -17,7 +17,7 @@ const OUTPUT_DIR = "summaries";
 const OUTPUT_FILE = `${OUTPUT_DIR}/ai_summaries.json`;
 const STATE_FILE = `${OUTPUT_DIR}/state.json`;
 
-const BATCH_SIZE = 100; 
+const BATCH_SIZE = 100;
 
 // ---------------------- Helpers ----------------------
 
@@ -234,7 +234,9 @@ async function main() {
     }
 
     if (results[prof.name] && isWrappingAround) {
-      console.log(`🔄 Regenerating summary for ${prof.name} (wrap-around mode)...`);
+      console.log(
+        `🔄 Regenerating summary for ${prof.name} (wrap-around mode)...`
+      );
     }
 
     console.log(
