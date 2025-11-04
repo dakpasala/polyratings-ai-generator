@@ -2,7 +2,7 @@ import fs from "fs";
 import fetch from "node-fetch";
 import { parse } from "csv-parse/sync";
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) {
   console.error("❌ Missing GEMINI_API_KEY in environment variables");
   process.exit(1);
@@ -17,7 +17,7 @@ const OUTPUT_DIR = "summaries";
 const OUTPUT_FILE = `${OUTPUT_DIR}/ai_summaries.json`;
 const STATE_FILE = `${OUTPUT_DIR}/state.json`;
 
-const BATCH_SIZE = 400; // for testing — later set to 400/day
+const BATCH_SIZE = 100; 
 
 // ---------------------- Helpers ----------------------
 
@@ -92,7 +92,11 @@ async function fetchCSV(url) {
 
 // ---------------------- Gemini API ----------------------
 
-async function callGeminiAnalysis(prof) {
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callGeminiAnalysis(prof, retries = 3) {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
   const prompt = `You are a helpful Cal Poly student assistant. Analyze this professor's data and provide a short summary.
@@ -110,20 +114,57 @@ and don't succeed. End your response with: "${prof.link}"`;
 
   const body = { contents: [{ parts: [{ text: prompt }] }] };
 
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
 
-  if (!resp.ok) {
-    console.log(`⚠️ Gemini API error ${resp.status} for ${prof.name}`);
-    return "AI summary unavailable.";
+      if (!resp.ok) {
+        const errorText = await resp.text();
+        console.log(
+          `⚠️ Gemini API error ${resp.status} for ${
+            prof.name
+          } (attempt ${attempt}/${retries}): ${errorText.substring(0, 100)}`
+        );
+
+        // If rate limited (429), wait longer before retry
+        if (resp.status === 429) {
+          const waitTime = Math.pow(2, attempt) * 2000; // Exponential backoff: 4s, 8s, 16s
+          console.log(
+            `   ⏳ Rate limited. Waiting ${waitTime / 1000}s before retry...`
+          );
+          await sleep(waitTime);
+          continue;
+        }
+
+        // For other errors, retry with shorter delay
+        if (attempt < retries) {
+          await sleep(1000 * attempt);
+          continue;
+        }
+
+        return "AI summary unavailable.";
+      }
+
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      return text || "AI summary unavailable.";
+    } catch (error) {
+      console.log(
+        `⚠️ Network error for ${prof.name} (attempt ${attempt}/${retries}): ${error.message}`
+      );
+      if (attempt < retries) {
+        await sleep(1000 * attempt);
+        continue;
+      }
+      return "AI summary unavailable.";
+    }
   }
 
-  const data = await resp.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-  return text || "AI summary unavailable.";
+  return "AI summary unavailable.";
 }
 
 // ---------------------- State Handling ----------------------
@@ -172,31 +213,53 @@ async function main() {
   const endIndex = Math.min(startIndex + BATCH_SIZE, professors.length);
 
   console.log(
-    `📦 Processing professors ${startIndex + 1}-${endIndex} of ${professors.length}`
+    `📦 Processing professors ${startIndex + 1}-${endIndex} of ${
+      professors.length
+    }`
   );
 
   const batch = professors.slice(startIndex, endIndex);
   const results = { ...existingSummaries };
 
-  for (const prof of batch) {
-    if (results[prof.name]) {
+  // Check if we've reached the end and need to wrap around
+  const isWrappingAround = endIndex >= professors.length;
+
+  for (let i = 0; i < batch.length; i++) {
+    const prof = batch[i];
+
+    // When wrapping around, we overwrite existing summaries instead of skipping
+    if (results[prof.name] && !isWrappingAround) {
       console.log(`⏩ Skipping ${prof.name} (already processed)`);
       continue;
     }
-    console.log(`🧠 Generating AI summary for ${prof.name}...`);
+
+    if (results[prof.name] && isWrappingAround) {
+      console.log(`🔄 Regenerating summary for ${prof.name} (wrap-around mode)...`);
+    }
+
+    console.log(
+      `🧠 [${i + 1}/${batch.length}] Generating AI summary for ${prof.name}...`
+    );
     const summary = await callGeminiAnalysis(prof);
     results[prof.name] = summary;
+
+    // Add delay between requests to avoid rate limiting (except for last item)
+    if (i < batch.length - 1) {
+      await sleep(1500); // 1.5 second delay between requests
+    }
   }
 
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(results, null, 2));
   console.log(`✅ Saved ${Object.keys(results).length} total summaries`);
 
-  // Update state for next run
-  saveState({ lastIndex: endIndex });
+  // Update state for next run - wrap around to 0 if we've reached the end
+  const nextIndex = endIndex >= professors.length ? 0 : endIndex;
+  saveState({ lastIndex: nextIndex });
 
   if (endIndex >= professors.length) {
-    console.log("🎉 All professors processed!");
+    console.log("🎉 Reached end of professors list - wrapping back to start!");
+    console.log(`📍 Next run will start from index: 0`);
   } else {
     console.log(`📍 Progress saved. Next start index: ${endIndex}`);
   }
