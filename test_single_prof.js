@@ -140,10 +140,10 @@ and don't succeed. End your response with: "${prof.link}"`;
   console.log(`📡 Response Status: ${resp.status}\n`);
 
   const data = await resp.json();
-  
+
   console.log("📦 Full Response:");
   console.log(JSON.stringify(data, null, 2));
-  
+
   if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
     console.log("\n✅ Generated Summary:");
     console.log(data.candidates[0].content.parts[0].text);
