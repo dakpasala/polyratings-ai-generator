@@ -1,6 +1,9 @@
 import fs from "fs";
 import fetch from "node-fetch";
 import { parse } from "csv-parse/sync";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) {
@@ -97,7 +100,19 @@ async function sleep(ms) {
 }
 
 async function callGeminiAnalysis(prof, retries = 3) {
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-robotics-er-1.5-preview:generateContent?key=${GEMINI_API_KEY}`;
+
+  // Check if professor has insufficient data
+  if (
+    prof.numEvals === 0 ||
+    !prof.comments ||
+    prof.comments.trim().length === 0
+  ) {
+    console.log(
+      `⚠️ Insufficient data for ${prof.name} (${prof.numEvals} evals, ${prof.comments.length} chars of comments)`
+    );
+    return `Professor ${prof.name} has limited reviews available. More student feedback is needed to generate a comprehensive summary.\n\n${prof.link}`;
+  }
 
   const prompt = `You are a helpful Cal Poly student assistant. Analyze this professor's data and provide a short summary.
 
@@ -125,10 +140,9 @@ and don't succeed. End your response with: "${prof.link}"`;
       if (!resp.ok) {
         const errorText = await resp.text();
         console.log(
-          `⚠️ Gemini API error ${resp.status} for ${
-            prof.name
-          } (attempt ${attempt}/${retries}): ${errorText.substring(0, 100)}`
+          `⚠️ Gemini API error ${resp.status} for ${prof.name} (attempt ${attempt}/${retries})`
         );
+        console.log(`   Error details: ${errorText.substring(0, 300)}`);
 
         // If rate limited (429), wait longer before retry
         if (resp.status === 429) {
@@ -150,7 +164,24 @@ and don't succeed. End your response with: "${prof.link}"`;
       }
 
       const data = await resp.json();
+
+      // Check for safety/content filtering
+      if (data?.candidates?.[0]?.finishReason === "SAFETY") {
+        console.log(
+          `⚠️ Content filtered by Gemini for ${prof.name} - safety reasons`
+        );
+        return `Professor ${prof.name} has reviews available, but an AI summary could not be generated at this time.\n\n${prof.link}`;
+      }
+
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+
+      if (!text) {
+        console.log(`⚠️ Empty response from Gemini for ${prof.name}`);
+        console.log(
+          `   Response data: ${JSON.stringify(data).substring(0, 200)}`
+        );
+      }
+
       return text || "AI summary unavailable.";
     } catch (error) {
       console.log(
