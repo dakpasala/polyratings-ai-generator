@@ -32,7 +32,7 @@ function getWeeklyMode() {
   return false;
 }
 
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_MODEL = "llama-3.1-8b-instant";
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 
 const RATINGS_URL =
@@ -42,7 +42,7 @@ const COMMENTS_URL =
 
 // Daily mode: process 200 per run. Weekly mode: process all at once.
 const DAILY_BATCH_SIZE = 200;
-const REQUEST_DELAY_MS = 2500; // 2.5s between requests — Groq free tier is very generous
+const REQUEST_DELAY_MS = 5000; // 2.5s between requests — Groq free tier is very generous
 
 // ---------------------- Helpers ----------------------
 
