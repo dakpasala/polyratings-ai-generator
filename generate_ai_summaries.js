@@ -13,24 +13,14 @@ if (!GROQ_API_KEY) {
   process.exit(1);
 }
 
-const OUTPUT_DIR = "summaries";
-const OUTPUT_FILE = `${OUTPUT_DIR}/ai_summaries.json`;
-const STATE_FILE = `${OUTPUT_DIR}/state.json`;
-
-// Weekly mode is controlled by summaries/config.json → { "weekly": 1 }
-// Set to 1 for weekly (regenerate all), 0 for daily (batched).
-function getWeeklyMode() {
-  const configPath = `${OUTPUT_DIR}/config.json`;
-  try {
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      return config.weekly === 1;
-    }
-  } catch {
-    // ignore parse errors
-  }
-  return false;
-}
+// =============================================
+// 🔧 CHANGE THIS FLAG TO CONTROL RUN MODE
+//    0 = DAILY  (process 200 professors per run)
+//    1 = WEEKLY (regenerate ALL professors)
+//    2 = NOTHING
+// =============================================
+const WEEKLY_FLAG = 2;
+// =============================================
 
 const GROQ_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct";
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
@@ -40,9 +30,12 @@ const RATINGS_URL =
 const COMMENTS_URL =
   "https://raw.githubusercontent.com/sreshtalluri/polyratings-data-collection/refs/heads/main/data/main/professor_detailed_reviews.csv";
 
-// Daily mode: process 200 per run. Weekly mode: process all at once.
+const OUTPUT_DIR = "summaries";
+const OUTPUT_FILE = `${OUTPUT_DIR}/ai_summaries.json`;
+const STATE_FILE = `${OUTPUT_DIR}/state.json`;
+
 const DAILY_BATCH_SIZE = 200;
-const REQUEST_DELAY_MS = 5000; // 2.5s between requests — Groq free tier is very generous
+const REQUEST_DELAY_MS = 5000;
 
 // ---------------------- Helpers ----------------------
 
@@ -126,7 +119,6 @@ function sleep(ms) {
 }
 
 async function callAISummary(prof, retries = 3) {
-  // Skip professors with no useful data
   if (prof.numEvals === 0 || !prof.comments || prof.comments.trim().length === 0) {
     console.log(`⚠️ Insufficient data for ${prof.name} (${prof.numEvals} evals)`);
     return `Professor ${prof.name} has limited reviews available. More student feedback is needed to generate a comprehensive summary.\n\n${prof.link}`;
@@ -230,7 +222,11 @@ function loadExistingSummaries() {
 // ---------------------- Main ----------------------
 
 async function main() {
-  const WEEKLY_MODE = getWeeklyMode();
+  if (WEEKLY_FLAG === 2) {
+    console.log("⏸️ WEEKLY_FLAG is 2 — doing nothing. Exiting.");
+    return;
+  }
+  const WEEKLY_MODE = WEEKLY_FLAG === 1;
   console.log(`🚀 Mode: ${WEEKLY_MODE ? "WEEKLY (full regeneration)" : "DAILY (batched)"}`);
   console.log(`🤖 Using Groq (${GROQ_MODEL})`);
   console.log("📡 Fetching professor data...");
@@ -251,7 +247,6 @@ async function main() {
   let endIndex;
 
   if (WEEKLY_MODE) {
-    // Weekly: regenerate ALL summaries, but keep existing ones as fallback
     console.log("🔄 Weekly run — regenerating all summaries (keeping old ones as fallback)");
     batch = professors;
     results = loadExistingSummaries();
@@ -259,7 +254,6 @@ async function main() {
     endIndex = professors.length;
     saveState({ lastIndex: 0 });
   } else {
-    // Daily: process next batch, skip already-done professors
     const state = loadState();
     startIndex = state.lastIndex || 0;
     endIndex = Math.min(startIndex + DAILY_BATCH_SIZE, professors.length);
@@ -274,7 +268,6 @@ async function main() {
   for (let i = 0; i < batch.length; i++) {
     const prof = batch[i];
 
-    // In daily mode, skip if already have a valid summary
     if (!WEEKLY_MODE && results[prof.name] && results[prof.name] !== "AI summary unavailable.") {
       skipped++;
       continue;
@@ -283,7 +276,6 @@ async function main() {
     console.log(`🧠 [${i + 1}/${batch.length}] ${prof.name}...`);
     const summary = await callAISummary(prof);
 
-    // In weekly mode, only overwrite if the new summary actually succeeded
     if (WEEKLY_MODE && summary === "AI summary unavailable." && results[prof.name] && results[prof.name] !== "AI summary unavailable.") {
       console.log(`   ↩️ Keeping existing summary for ${prof.name} (new call failed)`);
       skipped++;
@@ -292,17 +284,14 @@ async function main() {
       processed++;
     }
 
-    // Delay between requests (skip for last item)
     if (i < batch.length - 1) {
       await sleep(REQUEST_DELAY_MS);
     }
   }
 
-  // Save results
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(results, null, 2));
   console.log(`\n✅ Done! Processed: ${processed}, Skipped: ${skipped}, Total saved: ${Object.keys(results).length}`);
 
-  // Update state for next daily run
   if (WEEKLY_MODE) {
     saveState({ lastIndex: 0 });
     console.log("🎉 Weekly regeneration complete. State reset to 0.");
