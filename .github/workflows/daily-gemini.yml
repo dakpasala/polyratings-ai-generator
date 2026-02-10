@@ -3,10 +3,19 @@ name: Daily Gemini Summary Generator
 on:
   schedule:
     - cron: "0 8 * * *"  # runs every day at 8 AM UTC (midnight PST)
-  workflow_dispatch:      # allows manual run from GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: false
+        default: "daily"
+        type: choice
+        options:
+          - daily
+          - weekly
 
 permissions:
-  contents: write  # ✅ allow push access for github-actions[bot]
+  contents: write
 
 jobs:
   generate:
@@ -24,15 +33,40 @@ jobs:
       - name: 📦 Install dependencies
         run: npm install
 
+      - name: 🔍 Determine mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ github.event.inputs.mode }}"
+          else
+            DAY=$(date -u +%u)
+            if [ "$DAY" = "7" ]; then
+              MODE="weekly"
+            else
+              MODE="daily"
+            fi
+          fi
+          echo "MODE=$MODE" >> $GITHUB_OUTPUT
+          echo "🚀 Running in $MODE mode"
+          
+          mkdir -p summaries
+          if [ "$MODE" = "weekly" ]; then
+            echo '{ "weekly": 1 }' > summaries/config.json
+          else
+            echo '{ "weekly": 0 }' > summaries/config.json
+          fi
+
       - name: 🤖 Run Gemini generator script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: node generate_ai_summaries.js
 
       - name: 💾 Commit and push results
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "dakpasala"
+          git config user.email "dak.pasala@gmail.com"
           git add summaries/
-          git commit -m "🔁 Auto-update AI summaries (daily batch)" || echo "No new summaries to commit"
+          git commit -m "🔁 Auto-update AI summaries (${{ steps.mode.outputs.MODE }} - $(date -u +%Y-%m-%d))" || echo "No new summaries to commit"
           git push

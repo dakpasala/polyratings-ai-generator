@@ -5,22 +5,44 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) {
-  console.error("❌ Missing GEMINI_API_KEY in environment variables");
+// ---------------------- Config ----------------------
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+if (!GROQ_API_KEY) {
+  console.error("❌ Missing GROQ_API_KEY in environment variables");
   process.exit(1);
 }
+
+const OUTPUT_DIR = "summaries";
+const OUTPUT_FILE = `${OUTPUT_DIR}/ai_summaries.json`;
+const STATE_FILE = `${OUTPUT_DIR}/state.json`;
+
+// Weekly mode is controlled by summaries/config.json → { "weekly": 1 }
+// Set to 1 for weekly (regenerate all), 0 for daily (batched).
+function getWeeklyMode() {
+  const configPath = `${OUTPUT_DIR}/config.json`;
+  try {
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      return config.weekly === 1;
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return false;
+}
+
+const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 
 const RATINGS_URL =
   "https://raw.githubusercontent.com/sreshtalluri/polyratings-data-collection/refs/heads/main/data/main/professors_data.csv";
 const COMMENTS_URL =
   "https://raw.githubusercontent.com/sreshtalluri/polyratings-data-collection/refs/heads/main/data/main/professor_detailed_reviews.csv";
 
-const OUTPUT_DIR = "summaries";
-const OUTPUT_FILE = `${OUTPUT_DIR}/ai_summaries.json`;
-const STATE_FILE = `${OUTPUT_DIR}/state.json`;
-
-const BATCH_SIZE = 100;
+// Daily mode: process 200 per run. Weekly mode: process all at once.
+const DAILY_BATCH_SIZE = 200;
+const REQUEST_DELAY_MS = 2500; // 2.5s between requests — Groq free tier is very generous
 
 // ---------------------- Helpers ----------------------
 
@@ -38,7 +60,6 @@ function convertCSVToProfessorData(ratingsData, commentsData) {
       link: `https://polyratings.dev/professor/${row.id}`,
       clarity: parseFloat(row.materialClear) || 0,
       helpfulness: parseFloat(row.studentDifficulties) || 0,
-      comments: "",
       department: row.department || "",
       courses: row.courses || "",
       allComments: [],
@@ -61,7 +82,6 @@ function convertCSVToProfessorData(ratingsData, commentsData) {
         }`,
         clarity: 0,
         helpfulness: 0,
-        comments: "",
         department: row.professor_department || "",
         courses: row.course_code || "",
         allComments: [],
@@ -79,7 +99,14 @@ function convertCSVToProfessorData(ratingsData, commentsData) {
   });
 
   return Array.from(professorMap.values()).map((prof) => {
-    prof.comments = prof.allComments.join(" | ").substring(0, 2000);
+    const joined = prof.allComments.join(" | ");
+    const cutoff = 1200;
+    if (joined.length > cutoff) {
+      const lastPipe = joined.lastIndexOf(" | ", cutoff);
+      prof.comments = lastPipe > 0 ? joined.substring(0, lastPipe) : joined.substring(0, cutoff);
+    } else {
+      prof.comments = joined;
+    }
     delete prof.allComments;
     return prof;
   });
@@ -89,28 +116,19 @@ async function fetchCSV(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
   const text = await res.text();
-  const records = parse(text, { columns: true, skip_empty_lines: true });
-  return records;
+  return parse(text, { columns: true, skip_empty_lines: true });
 }
 
-// ---------------------- Gemini API ----------------------
+// ---------------------- Groq API ----------------------
 
-async function sleep(ms) {
+function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function callGeminiAnalysis(prof, retries = 3) {
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-robotics-er-1.5-preview:generateContent?key=${GEMINI_API_KEY}`;
-
-  // Check if professor has insufficient data
-  if (
-    prof.numEvals === 0 ||
-    !prof.comments ||
-    prof.comments.trim().length === 0
-  ) {
-    console.log(
-      `⚠️ Insufficient data for ${prof.name} (${prof.numEvals} evals, ${prof.comments.length} chars of comments)`
-    );
+async function callAISummary(prof, retries = 3) {
+  // Skip professors with no useful data
+  if (prof.numEvals === 0 || !prof.comments || prof.comments.trim().length === 0) {
+    console.log(`⚠️ Insufficient data for ${prof.name} (${prof.numEvals} evals)`);
     return `Professor ${prof.name} has limited reviews available. More student feedback is needed to generate a comprehensive summary.\n\n${prof.link}`;
   }
 
@@ -122,73 +140,60 @@ Material Clear: ${prof.clarity}/4.0
 Student Difficulties: ${prof.helpfulness}/4.0
 Department: ${prof.department}
 Courses: ${prof.courses}
-Student Comments: "${prof.comments.substring(0, 1000)}"
+Student Comments: "${prof.comments}"
 
-Provide 5 descriptive sentences describing what this professor is known for and what students can expect. Also talk about like which years succeed
-and don't succeed. End your response with: "${prof.link}"`;
+Provide 5 descriptive sentences describing what this professor is known for and what students can expect. Also talk about which years succeed and don't succeed. End your response with: "${prof.link}"`;
 
-  const body = { contents: [{ parts: [{ text: prompt }] }] };
+  const body = {
+    model: GROQ_MODEL,
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.7,
+    max_tokens: 500,
+  };
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const resp = await fetch(endpoint, {
+      const resp = await fetch(GROQ_ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+        },
         body: JSON.stringify(body),
       });
 
       if (!resp.ok) {
         const errorText = await resp.text();
-        console.log(
-          `⚠️ Gemini API error ${resp.status} for ${prof.name} (attempt ${attempt}/${retries})`
-        );
-        console.log(`   Error details: ${errorText.substring(0, 300)}`);
+        console.log(`⚠️ Groq API error ${resp.status} for ${prof.name} (attempt ${attempt}/${retries})`);
+        console.log(`   Error: ${errorText.substring(0, 200)}`);
 
-        // If rate limited (429), wait longer before retry
         if (resp.status === 429) {
-          const waitTime = Math.pow(2, attempt) * 2000; // Exponential backoff: 4s, 8s, 16s
-          console.log(
-            `   ⏳ Rate limited. Waiting ${waitTime / 1000}s before retry...`
-          );
+          const waitTime = Math.pow(2, attempt) * 3000;
+          console.log(`   ⏳ Rate limited. Waiting ${waitTime / 1000}s...`);
           await sleep(waitTime);
           continue;
         }
 
-        // For other errors, retry with shorter delay
         if (attempt < retries) {
-          await sleep(1000 * attempt);
+          await sleep(2000 * attempt);
           continue;
         }
-
         return "AI summary unavailable.";
       }
 
       const data = await resp.json();
-
-      // Check for safety/content filtering
-      if (data?.candidates?.[0]?.finishReason === "SAFETY") {
-        console.log(
-          `⚠️ Content filtered by Gemini for ${prof.name} - safety reasons`
-        );
-        return `Professor ${prof.name} has reviews available, but an AI summary could not be generated at this time.\n\n${prof.link}`;
-      }
-
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      const text = data?.choices?.[0]?.message?.content?.trim();
 
       if (!text) {
-        console.log(`⚠️ Empty response from Gemini for ${prof.name}`);
-        console.log(
-          `   Response data: ${JSON.stringify(data).substring(0, 200)}`
-        );
+        console.log(`⚠️ Empty response for ${prof.name}: ${JSON.stringify(data).substring(0, 200)}`);
+        return "AI summary unavailable.";
       }
 
-      return text || "AI summary unavailable.";
+      return text;
     } catch (error) {
-      console.log(
-        `⚠️ Network error for ${prof.name} (attempt ${attempt}/${retries}): ${error.message}`
-      );
+      console.log(`⚠️ Network error for ${prof.name} (attempt ${attempt}/${retries}): ${error.message}`);
       if (attempt < retries) {
-        await sleep(1000 * attempt);
+        await sleep(2000 * attempt);
         continue;
       }
       return "AI summary unavailable.";
@@ -198,12 +203,10 @@ and don't succeed. End your response with: "${prof.link}"`;
   return "AI summary unavailable.";
 }
 
-// ---------------------- State Handling ----------------------
+// ---------------------- State ----------------------
 
 function loadState() {
-  if (!fs.existsSync(STATE_FILE)) {
-    return { lastIndex: 0 };
-  }
+  if (!fs.existsSync(STATE_FILE)) return { lastIndex: 0 };
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
   } catch {
@@ -227,81 +230,94 @@ function loadExistingSummaries() {
 // ---------------------- Main ----------------------
 
 async function main() {
-  console.log("🚀 Fetching professor data...");
+  const WEEKLY_MODE = getWeeklyMode();
+  console.log(`🚀 Mode: ${WEEKLY_MODE ? "WEEKLY (full regeneration)" : "DAILY (batched)"}`);
+  console.log(`🤖 Using Groq (${GROQ_MODEL})`);
+  console.log("📡 Fetching professor data...");
+
   const [ratings, comments] = await Promise.all([
     fetchCSV(RATINGS_URL),
     fetchCSV(COMMENTS_URL),
   ]);
 
   const professors = convertCSVToProfessorData(ratings, comments);
-  console.log(`✅ Loaded ${professors.length} total professors`);
+  console.log(`✅ Loaded ${professors.length} professors`);
 
-  // Load state and existing summaries
-  const state = loadState();
-  const existingSummaries = loadExistingSummaries();
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  const startIndex = state.lastIndex || 0;
-  const endIndex = Math.min(startIndex + BATCH_SIZE, professors.length);
+  let batch;
+  let results;
+  let startIndex;
+  let endIndex;
 
-  console.log(
-    `📦 Processing professors ${startIndex + 1}-${endIndex} of ${
-      professors.length
-    }`
-  );
+  if (WEEKLY_MODE) {
+    // Weekly: regenerate ALL summaries, but keep existing ones as fallback
+    console.log("🔄 Weekly run — regenerating all summaries (keeping old ones as fallback)");
+    batch = professors;
+    results = loadExistingSummaries();
+    startIndex = 0;
+    endIndex = professors.length;
+    saveState({ lastIndex: 0 });
+  } else {
+    // Daily: process next batch, skip already-done professors
+    const state = loadState();
+    startIndex = state.lastIndex || 0;
+    endIndex = Math.min(startIndex + DAILY_BATCH_SIZE, professors.length);
+    batch = professors.slice(startIndex, endIndex);
+    results = loadExistingSummaries();
+    console.log(`📦 Processing professors ${startIndex + 1}–${endIndex} of ${professors.length}`);
+  }
 
-  const batch = professors.slice(startIndex, endIndex);
-  const results = { ...existingSummaries };
-
-  // Check if we've reached the end and need to wrap around
-  const isWrappingAround = endIndex >= professors.length;
+  let processed = 0;
+  let skipped = 0;
 
   for (let i = 0; i < batch.length; i++) {
     const prof = batch[i];
 
-    // When wrapping around, we overwrite existing summaries instead of skipping
-    if (results[prof.name] && !isWrappingAround) {
-      console.log(`⏩ Skipping ${prof.name} (already processed)`);
+    // In daily mode, skip if already have a valid summary
+    if (!WEEKLY_MODE && results[prof.name] && results[prof.name] !== "AI summary unavailable.") {
+      skipped++;
       continue;
     }
 
-    if (results[prof.name] && isWrappingAround) {
-      console.log(
-        `🔄 Regenerating summary for ${prof.name} (wrap-around mode)...`
-      );
+    console.log(`🧠 [${i + 1}/${batch.length}] ${prof.name}...`);
+    const summary = await callAISummary(prof);
+
+    // In weekly mode, only overwrite if the new summary actually succeeded
+    if (WEEKLY_MODE && summary === "AI summary unavailable." && results[prof.name] && results[prof.name] !== "AI summary unavailable.") {
+      console.log(`   ↩️ Keeping existing summary for ${prof.name} (new call failed)`);
+      skipped++;
+    } else {
+      results[prof.name] = summary;
+      processed++;
     }
 
-    console.log(
-      `🧠 [${i + 1}/${batch.length}] Generating AI summary for ${prof.name}...`
-    );
-    const summary = await callGeminiAnalysis(prof);
-    results[prof.name] = summary;
-
-    // Add delay between requests to avoid rate limiting (except for last item)
+    // Delay between requests (skip for last item)
     if (i < batch.length - 1) {
-      await sleep(1500); // 1.5 second delay between requests
+      await sleep(REQUEST_DELAY_MS);
     }
   }
 
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  // Save results
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(results, null, 2));
-  console.log(`✅ Saved ${Object.keys(results).length} total summaries`);
+  console.log(`\n✅ Done! Processed: ${processed}, Skipped: ${skipped}, Total saved: ${Object.keys(results).length}`);
 
-  // Update state for next run - wrap around to 0 if we've reached the end
-  const nextIndex = endIndex >= professors.length ? 0 : endIndex;
-  saveState({ lastIndex: nextIndex });
-
-  if (endIndex >= professors.length) {
-    console.log("🎉 Reached end of professors list - wrapping back to start!");
-    console.log(`📍 Next run will start from index: 0`);
+  // Update state for next daily run
+  if (WEEKLY_MODE) {
+    saveState({ lastIndex: 0 });
+    console.log("🎉 Weekly regeneration complete. State reset to 0.");
   } else {
-    console.log(`📍 Progress saved. Next start index: ${endIndex}`);
+    const nextIndex = endIndex >= professors.length ? 0 : endIndex;
+    saveState({ lastIndex: nextIndex });
+    if (endIndex >= professors.length) {
+      console.log("🎉 Reached end of list — next run starts from 0.");
+    } else {
+      console.log(`📍 Next run starts at index: ${nextIndex}`);
+    }
   }
-
-  console.log("\n📜 Latest batch:");
-  console.log(batch.map((p) => `${p.name}: ${results[p.name]}`).join("\n\n"));
 }
 
 main().catch((err) => {
-  console.error("❌ Error running script:", err);
+  console.error("❌ Fatal error:", err);
   process.exit(1);
 });
