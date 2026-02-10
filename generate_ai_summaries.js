@@ -32,7 +32,7 @@ function getWeeklyMode() {
   return false;
 }
 
-const GROQ_MODEL = "llama-3.1-8b-instant";
+const GROQ_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct";
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 
 const RATINGS_URL =
